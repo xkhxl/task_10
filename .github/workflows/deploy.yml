@@ -15,23 +15,21 @@ env:
   ECS_SERVICE: strapi-service
   CODEDEPLOY_APP: akhil-strapi-codedeploy
   CODEDEPLOY_DG: akhil-strapi-dg
+  TASK_FAMILY: akhil-strapi-task
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Ensure jq exists
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
@@ -39,58 +37,56 @@ jobs:
       - name: Fetch current task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition akhil-strapi-task \
+            --task-definition $TASK_FAMILY \
             --query taskDefinition \
             > taskdef.json
 
-      # 2️⃣ Clean task definition + update image (CRITICAL STEP)
-      - name: Update image in task definition (safe)
+      # 2️⃣ Update image
+      - name: Update image
         run: |
           jq '
-            del(
-              .taskDefinitionArn,
-              .revision,
-              .status,
-              .requiresAttributes,
-              .compatibilities,
-              .registeredAt,
-              .registeredBy
-            )
-            | .containerDefinitions[0].image =
-              "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
+            .containerDefinitions[0].image =
+            "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
           ' taskdef.json > new-taskdef.json
 
       # 3️⃣ Register new task definition
       - name: Register new task definition
+        id: register
         run: |
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://new-taskdef.json \
-            --query 'taskDefinition.taskDefinitionArn' \
+            --query "taskDefinition.taskDefinitionArn" \
             --output text)
 
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # 4️⃣ Create AppSpec file
-      - name: Create AppSpec
+      # 4️⃣ Create AppSpec JSON (NOT YAML)
+      - name: Create AppSpec JSON
         run: |
-          cat <<EOF > appspec.yaml
-          version: 0.0
-          Resources:
-            - TargetService:
-                Type: AWS::ECS::Service
-                Properties:
-                  TaskDefinition: "$TASK_DEF_ARN"
-                  LoadBalancerInfo:
-                    ContainerName: "strapi"
-                    ContainerPort: 1337
+          cat <<EOF > appspec.json
+          {
+            "version": "0.0",
+            "Resources": [
+              {
+                "TargetService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "TaskDefinition": "$TASK_DEF_ARN",
+                    "LoadBalancerInfo": {
+                      "ContainerName": "strapi",
+                      "ContainerPort": 1337
+                    }
+                  }
+                }
+              }
+            ]
+          }
           EOF
 
-      # 5️⃣ Trigger CodeDeploy (safe JSON encoding)
-      - name: Create CodeDeploy deployment
+      # 5️⃣ Trigger CodeDeploy (CORRECT WAY)
+      - name: Create CodeDeploy Deployment
         run: |
-          APPSPEC_CONTENT=$(jq -Rs . < appspec.yaml)
-
           aws deploy create-deployment \
             --application-name $CODEDEPLOY_APP \
             --deployment-group-name $CODEDEPLOY_DG \
-            --revision "revisionType=AppSpecContent,appSpecContent={content=$APPSPEC_CONTENT}"
+            --revision revisionType=AppSpecContent,appSpecContent="$(cat appspec.json)"
