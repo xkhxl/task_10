@@ -11,10 +11,13 @@ env:
   AWS_REGION: ap-south-1
   AWS_ACCOUNT_ID: 301782007642
   ECR_REPOSITORY: strapi
+
   ECS_CLUSTER: akhil-strapi-ecs
   ECS_SERVICE: strapi-service
+
   CODEDEPLOY_APP: akhil-strapi-codedeploy
   CODEDEPLOY_DG: akhil-strapi-dg
+
   TASK_FAMILY: akhil-strapi-task
 
 jobs:
@@ -22,9 +25,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -33,7 +38,7 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 1️⃣ Fetch current task definition
+      # 1️⃣ Fetch existing task definition
       - name: Fetch current task definition
         run: |
           aws ecs describe-task-definition \
@@ -41,17 +46,25 @@ jobs:
             --query taskDefinition \
             > taskdef.json
 
-      # 2️⃣ Update image
-      - name: Update image
+      # 2️⃣ Sanitize + update image (CRITICAL STEP)
+      - name: Prepare new task definition
         run: |
           jq '
-            .containerDefinitions[0].image =
-            "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions[0].image =
+              "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
           ' taskdef.json > new-taskdef.json
 
       # 3️⃣ Register new task definition
       - name: Register new task definition
-        id: register
         run: |
           TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://new-taskdef.json \
@@ -60,7 +73,7 @@ jobs:
 
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # 4️⃣ Create AppSpec JSON (NOT YAML)
+      # 4️⃣ Create AppSpec JSON (CodeDeploy ECS format)
       - name: Create AppSpec JSON
         run: |
           cat <<EOF > appspec.json
@@ -83,10 +96,12 @@ jobs:
           }
           EOF
 
-      # 5️⃣ Trigger CodeDeploy (CORRECT WAY)
-      - name: Create CodeDeploy Deployment
+      # 5️⃣ Trigger CodeDeploy (SAFE ENCODING)
+      - name: Create CodeDeploy deployment
         run: |
+          APPSPEC_CONTENT=$(jq -Rs . < appspec.json)
+
           aws deploy create-deployment \
             --application-name $CODEDEPLOY_APP \
             --deployment-group-name $CODEDEPLOY_DG \
-            --revision revisionType=AppSpecContent,appSpecContent="$(cat appspec.json)"
+            --revision "revisionType=AppSpecContent,appSpecContent={content=$APPSPEC_CONTENT}"
