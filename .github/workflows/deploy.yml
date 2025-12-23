@@ -38,7 +38,7 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 1️⃣ Fetch existing task definition
+      # 1️⃣ Fetch current task definition
       - name: Fetch current task definition
         run: |
           aws ecs describe-task-definition \
@@ -46,7 +46,7 @@ jobs:
             --query taskDefinition \
             > taskdef.json
 
-      # 2️⃣ Sanitize + update image (CRITICAL STEP)
+      # 2️⃣ Sanitize + update image
       - name: Prepare new task definition
         run: |
           jq '
@@ -73,7 +73,7 @@ jobs:
 
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # 4️⃣ Create AppSpec JSON (CodeDeploy ECS format)
+      # 4️⃣ Create AppSpec JSON (ECS format)
       - name: Create AppSpec JSON
         run: |
           cat <<EOF > appspec.json
@@ -96,12 +96,10 @@ jobs:
           }
           EOF
 
-      # 5️⃣ Trigger CodeDeploy (SAFE ENCODING)
+      # 5️⃣ Trigger CodeDeploy (THE CORRECT WAY)
       - name: Create CodeDeploy deployment
         run: |
-          APPSPEC_CONTENT=$(jq -Rs . < appspec.json)
-
           aws deploy create-deployment \
             --application-name $CODEDEPLOY_APP \
             --deployment-group-name $CODEDEPLOY_DG \
-            --revision "revisionType=AppSpecContent,appSpecContent={content=$APPSPEC_CONTENT}"
+            --revision revisionType=AppSpecContent,appSpecContent=file://appspec.json
