@@ -46,7 +46,7 @@ jobs:
             --query taskDefinition \
             > taskdef.json
 
-      # 2️⃣ Sanitize + update image
+      # 2️⃣ Sanitize task definition and update image
       - name: Prepare new task definition
         run: |
           jq '
@@ -73,33 +73,27 @@ jobs:
 
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # 4️⃣ Create AppSpec JSON (ECS format)
-      - name: Create AppSpec JSON
+      # 4️⃣ Create AppSpec YAML (ECS CodeDeploy expects YAML)
+      - name: Create AppSpec YAML
         run: |
-          cat <<EOF > appspec.json
-          {
-            "version": "0.0",
-            "Resources": [
-              {
-                "TargetService": {
-                  "Type": "AWS::ECS::Service",
-                  "Properties": {
-                    "TaskDefinition": "$TASK_DEF_ARN",
-                    "LoadBalancerInfo": {
-                      "ContainerName": "strapi",
-                      "ContainerPort": 1337
-                    }
-                  }
-                }
-              }
-            ]
-          }
+          cat <<EOF > appspec.yaml
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: $TASK_DEF_ARN
+                  LoadBalancerInfo:
+                    ContainerName: strapi
+                    ContainerPort: 1337
           EOF
 
-      # 5️⃣ Trigger CodeDeploy (THE CORRECT WAY)
+      # 5️⃣ Trigger CodeDeploy (CORRECT ECS METHOD)
       - name: Create CodeDeploy deployment
         run: |
+          APPSPEC_CONTENT=$(jq -Rs . < appspec.yaml)
+
           aws deploy create-deployment \
             --application-name $CODEDEPLOY_APP \
             --deployment-group-name $CODEDEPLOY_DG \
-            --revision revisionType=AppSpecContent,appSpecContent=file://appspec.json
+            --revision "revisionType=AppSpecContent,appSpecContent={content=$APPSPEC_CONTENT}"
