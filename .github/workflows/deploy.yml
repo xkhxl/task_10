@@ -12,9 +12,6 @@ env:
   AWS_ACCOUNT_ID: 301782007642
   ECR_REPOSITORY: strapi
 
-  ECS_CLUSTER: akhil-strapi-ecs
-  ECS_SERVICE: strapi-service
-
   CODEDEPLOY_APP: akhil-strapi-codedeploy
   CODEDEPLOY_DG: akhil-strapi-dg
 
@@ -38,15 +35,14 @@ jobs:
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 1️⃣ Fetch current task definition
-      - name: Fetch current task definition
+      # 1️⃣ Fetch task definition
+      - name: Fetch task definition
         run: |
           aws ecs describe-task-definition \
             --task-definition $TASK_FAMILY \
-            --query taskDefinition \
-            > taskdef.json
+            --query taskDefinition > taskdef.json
 
-      # 2️⃣ Sanitize task definition and update image
+      # 2️⃣ Sanitize + update image
       - name: Prepare new task definition
         run: |
           jq '
@@ -63,7 +59,7 @@ jobs:
               "${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
           ' taskdef.json > new-taskdef.json
 
-      # 3️⃣ Register new task definition
+      # 3️⃣ Register task definition
       - name: Register new task definition
         run: |
           TASK_DEF_ARN=$(aws ecs register-task-definition \
@@ -73,11 +69,11 @@ jobs:
 
           echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      # 4️⃣ Create AppSpec YAML (ECS CodeDeploy expects YAML)
-      - name: Create AppSpec YAML
+      # 4️⃣ Create AppSpec YAML (same as working local)
+      - name: Create AppSpec
         run: |
           cat <<EOF > appspec.yaml
-          version: 0.0
+          version: 1
           Resources:
             - TargetService:
                 Type: AWS::ECS::Service
@@ -88,12 +84,27 @@ jobs:
                     ContainerPort: 1337
           EOF
 
-      # 5️⃣ Trigger CodeDeploy (CORRECT ECS METHOD)
+      # 5️⃣ Create deploy.json (THIS IS THE KEY)
+      - name: Create deploy.json
+        run: |
+          APPSPEC_CONTENT=$(sed ':a;N;$!ba;s/\n/\\n/g' appspec.yaml)
+
+          cat <<EOF > deploy.json
+          {
+            "applicationName": "$CODEDEPLOY_APP",
+            "deploymentGroupName": "$CODEDEPLOY_DG",
+            "revision": {
+              "revisionType": "AppSpecContent",
+              "appSpecContent": {
+                "content": "$APPSPEC_CONTENT"
+              }
+            },
+            "description": "GitHub Actions Blue/Green deployment"
+          }
+          EOF
+
+      # 6️⃣ Trigger deployment (PROVEN METHOD)
       - name: Create CodeDeploy deployment
         run: |
-          APPSPEC_CONTENT=$(jq -Rs . < appspec.yaml)
-
           aws deploy create-deployment \
-            --application-name $CODEDEPLOY_APP \
-            --deployment-group-name $CODEDEPLOY_DG \
-            --revision "revisionType=AppSpecContent,appSpecContent={content=$APPSPEC_CONTENT}"
+            --cli-input-json file://deploy.json
